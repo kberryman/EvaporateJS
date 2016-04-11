@@ -4,10 +4,20 @@ EvaporateJS
 EvaporateJS is a javascript library for directly uploading files from a web browser to AWS S3, using S3's multipart upload. 
 
 ### Why?
-EvaporateJS can resume an upload after a problem without having to start again at the beginning. For example, let's say you're uploading a 1000MB file, you've uploaded the first 900MBs, and then there is a problem on the network. Normally at this point you'd have to restart the upload from the beginning. Not so with EvaporateJS - it will only redo a small ~5MB chunk of the file, and then carry on from where it left off, and upload the final 100MB.     
+EvaporateJS can resume an upload after a problem without having to start again at the beginning. For example, let's say
+you're uploading a 1000MB file, you've uploaded the first 900MBs, and then there is a problem on the network. Normally
+at this point you'd have to restart the upload from the beginning. Not so with EvaporateJS - it will only redo part
+that failed, and then carry on from where it left off, and upload the final 100MB.
 
-This is an beta release. It still needs lots more work and testing, but we do use it in production on videopixie.com, and we've seen it upload 100GB+ files.
+In addition, EvaporateJS can resume uploads of entire files and parts when the upload failed due to a user or client
+error. For example, if the user refreshes the browser during an upload. To reciver, upload the same files. Those
+files (or the successfully uploaded file parts) that are available on AWS S3 through an incomplete multipart upload
+or an existing S3 object will not be reuploaded.
 
+### Browser Compatibility
+EvaporteJS requires browsers that [support](http://caniuse.com/#feat=fileapi) the JavaScript File API, which includes the `FileReader` object. The MD5 Digest
+support requires that FileReader support the `readAsArrayBuffer` method. For details, look at the `supported` property of the `EvaporateJS`
+object.
 
 ## Set up EvaporateJS
 
@@ -16,7 +26,17 @@ This is an beta release. It still needs lots more work and testing, but we do us
 
      <script language="javascript" type="text/javascript" src="../evaporate.js"></script>
 
-2. Setup your S3 bucket, make sure your CORS settings for your S3 bucket looks similar to what is provided below (The PUT allowed method and the ETag exposed header are critical).
+2. If you want to compute an MD5 digest for AWS, then make sure to include your preferred javascript
+cryptography library that supports creating an MD5 digest for the Content-MD5 request header as
+specified [here](https://www.ietf.org/rfc/rfc1864.txt). The following library provides support:
+
+     - [Spark MD5](https://github.com/satazor/SparkMD5)
+     - [AWS SDK for JavaScript 2.2.43](https://github.com/aws/aws-sdk-js)
+
+2. Setup your S3 bucket, make sure your CORS settings for your S3 bucket looks similar to what is provided
+below (The PUT allowed method and the ETag exposed header are critical).
+
+    The `DELETE` method is required to support aborting multipart uploads.
 
         <CORSConfiguration>
             <CORSRule>
@@ -25,12 +45,66 @@ This is an beta release. It still needs lots more work and testing, but we do us
                 <AllowedMethod>PUT</AllowedMethod>
                 <AllowedMethod>POST</AllowedMethod>
                 <AllowedMethod>DELETE</AllowedMethod>
+                <AllowedMethod>GET</AllowedMethod>
                 <ExposeHeader>ETag</ExposeHeader>
                 <AllowedHeader>*</AllowedHeader>
             </CORSRule>
         </CORSConfiguration>
 
-3. Setup a signing handler on your application server (see `signer_example.py`).  This handler will create a signature for your multipart request that is sent to S3.  This handler will be contacted via AJAX on your site by evaporate.js. You can monitor these requests by running the sample app locally and using the Chrome Web inspector.
+3. Setup your S3 bucket Policy to support creating, resuming and aborting multi-part uploads. The following AWS S3 policy can be used as a template.
+
+    Replace the AWS ARNs with values that apply to your account and S3 bucket organization.
+
+        {
+            "Version": "2012-10-17",
+            "Id": "Policy145337ddwd",
+            "Statement": [
+                {
+                    "Sid": "",
+                    "Effect": "Allow",
+                    "Principal": {
+                        "AWS": "arn:aws:iam::6681765859115:user/me"
+                    },
+                    "Action": [
+                        "s3:AbortMultipartUpload",
+                        "s3:ListMultipartUploadParts",
+                        "s3:PutObject"
+                    ],
+                    "Resource": "arn:aws:s3:::mybucket/*"
+                }
+            ]
+        }
+
+    If you configure the uploader to enable the S3 existence check optimization (configuration option `allowS3ExistenceOptimization`), then you should
+    add the `s3:GetObject` action to your bucket object statement and your S3 CORS settings must include `HEAD` method if you want to check for object 
+    existence on S3.
+    Your security policies can help guide you in whether you want to enable this optimization or not.
+
+    Here is an example of the bucket object policy statement that includes the required actions:
+
+        {
+            "Version": "2012-10-17",
+            "Id": "Policy145337ddwd",
+            "Statement": [
+                {
+                    "Sid": "",
+                    "Effect": "Allow",
+                    "Principal": {
+                        "AWS": "arn:aws:iam::6681765859115:user/me"
+                    },
+                    "Action": [
+                        "s3:AbortMultipartUpload",
+                        "s3:ListMultipartUploadParts",
+                        "s3:GetObject",
+                        "s3:PutObject"
+                    ],
+                    "Resource": "arn:aws:s3:::mybucket/*"
+                }
+            ]
+        }
+
+
+4. Setup a signing handler on your application server (see `signer_example.py`).  This handler will create a signature for your multipart request that is sent to S3.  This handler will be contacted via AJAX on your site by evaporate.js. You can monitor these requests by running the sample app locally and using the Chrome Web inspector.
 
 
 ## Running the example application
@@ -39,8 +113,7 @@ The example application is a simple and quick way to see evaporate.js work.  The
 
 1. Install Google App Engine for Python found [here](https://developers.google.com/appengine/downloads#Google_App_Engine_SDK_for_Python) (The example app is GAE ready and it is run using the GAE dev server)
 
-2. Set your AWS Key and S3 bucket in example/evaporate_example.html
-
+2. Set your AWS Key and S3 bucket in example/evaporate_example.html. This configuration does not use Md5 Digest verfication.
 
         var _e_ = new Evaporate({
            signerUrl: '/sign_auth', # Do not change this in the example app
@@ -86,13 +159,31 @@ So far the api contains just two methods, and one property
 * **logging**: default=true, whether EvaporateJS outputs to the console.log  - should be `true` or `false`
 * **maxConcurrentParts**: default=5, how many concurrent file PUTs will be attempted
 * **partSize**: default = 6 * 1024 * 1024 bytes, the size of the parts into which the file is broken
-* **retryBackoffPower**: default=2, how aggresively to back-off on the delay between retries of a part PUT
+* **retryBackoffPower**: default=2, how aggressively to back-off on the delay between retries of a part PUT
 * **maxRetryBackoffSecs**: default=20, the maximum number of seconds to wait between retries 
 * **progressIntervalMS**: default=1000, the frequency (in milliseconds) at which progress events are dispatched
 * **aws_url**: default='https://s3.amazonaws.com', the S3 endpoint URL
 * **cloudfront**: default=false, whether to format upload urls to upload via CloudFront. Usually requires aws_url to be something other than the default
-* **timeUrl',**: default=undefined, a url on your application server which will return a DateTime. for example '/sign_auth/time' and return a RF 2616 Date (http://www.w3.org/Protocols/rfc2616/rfc2616-sec3.html) e.g. "Tue, 01 Jan 2013 04:39:43 GMT".  See https://github.com/TTLabs/EvaporateJS/issues/74
-
+* **timeUrl**: default=undefined, a url on your application server which will return a DateTime. for example '/sign_auth/time' and return a 
+    RF 2616 Date (http://www.w3.org/Protocols/rfc2616/rfc2616-sec3.html) e.g. "Tue, 01 Jan 2013 04:39:43 GMT".  See https://github.com/TTLabs/EvaporateJS/issues/74.
+* **computeContentMd5**: default=false, whether to compute and send an MD5 digest for each part for verification by AWS S3.,
+* **cryptoMd5Method**: default=undefined, a method that computes the MD5 digest according to https://www.ietf.org/rfc/rfc1864.txt. Only applicable when `computeContentMd5` is set.
+    Method signature is `function (data) { return 'computed MD5 digest of data'; }` where `data` is a JavaScript `ArrayBuffer` representation of the part 
+    payload to encode. If you are using:
+    - Spark MD5, the method would look like this: `function (data) { return btoa(SparkMD5.ArrayBuffer.hash(data, true)); }`.
+    - AWS SDK for JavaScript: `function (data) { return AWS.util.crypto.md5(data, 'base64'); }`. 
+* **s3FileCacheHoursAgo**: default=null (no cache), whether to use the S3 uploaded cache of parts and files for ease of recovering after
+    client failure or page refresh. The value should be a whole number representing the number of hours ago to check for uploaded parts
+    and files. The uploaded parts and and file status are retrieved from S3. If no cache is set, EvaporateJS will not resume uploads after
+    client or user errors. Refer to the section below for more information on this configuration option.
+* **allowS3ExistenceOptimization**: default=false, whether to verify file existence against S3 storage. Enabling this option requires
+    that the target S3 bucket object permissions include the `s3:GetObject` action for the authorized user performing the upload. If enabled, if the uploader
+    believes it is attempting to upload a file that already exists, it will perform a HEAD action on the object to verify its eTag. If this option
+    is not set or if the cached eTag does not match the object's eTag, the file will be uploaded again. This option is only
+    enabled if `computeContentMd5` is enabled.
+* **awsLambda**: default=null, An AWS Lambda object, refer to [AWS Lambda](http://docs.aws.amazon.com/lambda/latest/dg/welcome.html). Refer to
+    section "Using AWS Lambda to Sign Requests" below.
+* **awsLambdaFunction**: default=null, The AWS ARN of your lambda function. Required when `awsLambda` has been specified.
 ### .add()
 
 `evap.add(config)`
@@ -102,7 +193,9 @@ So far the api contains just two methods, and one property
 * **name**: _String_. the S3 ObjectName that the completed file will have
 * **file**: _File_. a reference to the file object
 
-`config` has 8 optional parameter:
+The `.add()` method returns the internal EvaporateJS id of the upload to process. Use this id to abort or cancel an upload.
+
+`config` has a number of optional parameters:
 
 
 * **xAmzHeadersAtInitiate**, **xAmzHeadersAtUpload**, **xAmzHeadersAtComplete**: _Object_. an object of key/value pairs that represents the x-amz-... headers that should be added to the initiate POST, the upload PUTS, or the complete POST to S3 (respectively) and should be signed by the aws secret key. An example for initiate would be `{'x-amz-acl':'public-read'}` and for all three would be `{'x-amz-security-token':'the-long-session-token'}` which is needed when using temporary security credentials (IAM roles).
@@ -111,7 +204,9 @@ So far the api contains just two methods, and one property
 
 * **signParams**: _Object_. an object of key/value pairs that will be passed to _all_ calls to the signerUrl. 
 
-* **complete**: _function()_. a function that will be called when the file upload is complete.
+* **signHeaders**: _Object_. an object of key/value pairs that will be passed as headers to _all_ calls to the signerUrl.
+
+* **complete**: _function(xhr, awsObjectKey)_. a function that will be called when the file upload is complete. Version 1.0.0 introduced the `awsObjectKey` parameter to notifiy the client of the S3 object key that was used if the object already exists on S3.
  
 * **cancelled**: _function()_.  a function that will be called when a successful cancel is called for an upload id.
 
@@ -132,19 +227,97 @@ So far the api contains just two methods, and one property
 
 ### .supported
 
-The `supported` property is _Boolean_, and indicates whether the browser has the capabilities required for Evaporate to work. Needs more testing.  
+The `supported` property is _Boolean_, and indicates whether the browser has the capabilities required for Evaporate to work.
 
+### s3FileCacheHoursAgo
+
+When `s3FileCacheHoursAgo` is enabled, the uploader will create a small footprint of the uploaded file in `localStorage.awsUploads`. Before a
+file is uploaded, this cache is queried by a key consisting of the file's name, size, mimetype and date timestamp.
+It then verifies that the `partSize` used when uploading matches the partSize currenlty in use. To prevent fase positives, the
+upload then calcuates the MD5 digest of the first part for final verification.
+
+If the uploaded file has an unfinished multipart upload ID associated with it, then the uploader queries S3 for the parts that 
+have been uploaded. It hen uploads only the unfinished parts.
+
+If the uploaded file has no open multipart upload, then the ETag of the last time the file was uploaded to S3 is compared to 
+the Etag of what is currently uploaded. If the the two ETags match, the file is not uploaded again.
+
+The timestamp of the last time the part was uploaded is compared against the value of a `Date()` calculated as `s3FileCacheHoursAgo` ago
+as a way to gauge 'freshness'. If the last upload was earlier than the number of hours specified, then the file is uploaded again.
+
+It is still possible to have different files with the same name, size and timestamp. In this case, EvaporateJS calculates the checksum for the first
+part and compares that to the checksum of the first part of the file to be uploaded. If they differ, the file is uploaded anew.
+
+Note that in order to determine if the uploaded file is the same as a local file, the uploader invokes a HEAD request to S3.
+The AWS S3 permissions to allow HEAD also allow GET (get object). This means that your signing url algorithm might want to not sign
+GET requests. It goes without saying that your AWS IAM credentials and secrets should be protected and never shared.
+
+### AWS S3 Cleanup and Housekeeping
+
+After you initiate multipart upload and upload one or more parts, you must either complete or abort multipart upload in order to stop 
+getting charged for storage of the uploaded parts. Only after you either complete or abort multipart upload, Amazon S3 frees up the parts 
+storage and stops charging you for the parts storage. Refer to the 
+[AWS Multipart Upload Overview](http://docs.aws.amazon.com/AmazonS3/latest/dev/mpuoverview.html) for more information.
+
+The sample S3 bucket policy shown above should configure your S3 bucket to allow cleanup of orphaned multipart uploads but the cleanup task is
+not part of EvaporateJS. A separate tool or task will need to be created to query orphaned multipart uploads and abort them using some appropriate 
+heuristic.
+
+Refer to this functioning [Ruby on Rails rake task](https://github.com/bikeath1337/evaporate/blob/master/lib/tasks/cleanup.rake) for ideas.  
+
+## Working with temporary credentials in Amazon EC2 instances
+
+* [Security and S3 Multipart Upload](http://www.thoughtworks.com/mingle/infrastructure/2015/06/15/security-and-s3-multipart-upload.html)
+
+## Using AWS Lambda to Sign Requests
+
+You need to do a couple of things
+
+* Include the AWS SDK for Javascript, either directly, bower, or browserify
+
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.2.43.min.js"></script>
+
+* Create a lambda function see: [`signing_example_lambda.js`](example/signing_example_lambda.js)
+
+  The Lambda function will receive three parameters to the event; `to_sign`, `sign_params` and `sign_headers`. 
+
+* Setup an IAM user with permissions to call your lambda function. This user should be separate from the one that can
+upload to S3. Here is a sample policy
+
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "Stmt1431709794000",
+                "Effect": "Allow",
+                "Action": [
+                    "lambda:InvokeFunction"
+                ],
+                "Resource": [
+                    "arn:aws:lambda:...:function:cw-signer"
+                ]
+            }
+        ]
+    }
+
+* Pass two options to the Evaporate constructor - `awsLambda` and `awsLambdaFunction`, instead of `signerUrl`
+
+    var _e_ = new Evaporate({
+        aws_key: 'your aws_key here',
+        bucket: 'your s3 bucket name here',
+        awsLambda:  new AWS.Lambda({
+            'region': 'lambda region',
+            'accessKeyId': 'a key that can invoke the lambda function',
+            'secretAccessKey': 'the secret'
+        }),
+        awsLambdaFunction: 'arn:aws:lambda:...:function:cw-signer' // arn of your lambda function
+     });
 
 ## Integration
 
 * [angular-evaporate](https://github.com/uqee/angular-evaporate) &mdash; AngularJS module.
-* 
 
 ## License
 
 EvaporateJS is licensed under the BSD 3-Caluse License
 http://opensource.org/licenses/BSD-3-Clause
-
-## Working with temporary credentials in Amazon EC2 instances
-
-* [Security and S3 Multipart Upload](http://www.thoughtworks.com/mingle/infrastructure/2015/06/15/security-and-s3-multipart-upload.html)

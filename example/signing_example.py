@@ -7,12 +7,13 @@ import webapp2
 import base64
 import hmac, sha
 
-# get your AWS_SECRET_KEY from somewhere...
-# from foo import AWS_SECRET_KEY
+# get YOUR_AWS_SECRET_KEY from somewhere...
+# from foo import YOUR_AWS_SECRET_KEY
 
 class SignAuth(webapp2.RequestHandler):
 
    def get(self):
+      # TODO: Do something to authenticate this request
       to_sign = str(self.request.get('to_sign'))
       signature = base64.b64encode(hmac.new('YOUR_AWS_SECRET_KEY', to_sign, sha).digest())
       self.response.headers['Content-Type'] = "text/HTML"
